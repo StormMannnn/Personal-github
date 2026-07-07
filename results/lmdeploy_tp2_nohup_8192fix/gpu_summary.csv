@@ -1,0 +1,3 @@
+label,gpu_index,samples,gpu_util_avg_pct,gpu_util_peak_pct,memory_peak_mib,power_avg_w,temperature_peak_c
+lmdeploy_tp2_8192fix,0,13222,74.2503,100.0000,22793.0000,297.7704,92.0000
+lmdeploy_tp2_8192fix,1,13222,74.3625,100.0000,22607.0000,283.9765,67.0000

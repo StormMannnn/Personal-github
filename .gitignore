@@ -1,0 +1,25 @@
+# GPU metrics (very large CSV files, 100MB+)
+results/*/gpu_metrics.csv
+
+# Process ID files
+*.pid
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# venv / conda
+.venv/
+venv/
+env/
+
+# nohup output (often empty or irrelevant)
+nohup.out
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

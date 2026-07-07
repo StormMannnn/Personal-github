@@ -1,0 +1,189 @@
+# vLLM TP=2 14B 压测启动命令说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用 vLLM 部署
+#   DeepSeek-R1-Distill-Qwen-14B，并重新跑一轮压测。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本轮结果保存路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix
+#
+# 为什么这次要改 --max-model-len：
+#   上一轮 vLLM 服务使用 --max-model-len 8192。
+#   但是压测里的长上下文场景是：
+#     输入 8192 tokens + 输出 256 tokens = 总长度 8448 tokens
+#   总长度超过 8192 后，vLLM 会直接返回 HTTP 400。
+#   所以本次把 --max-model-len 改成 9216，给 8192 输入场景留出输出空间。
+#
+# 建议启动顺序：
+#   1. 如果旧服务还在运行，先停止旧 vLLM 和旧 GPU 监控。
+#   2. 启动新的 vLLM 服务。
+#   3. 等 vLLM 日志出现 Application startup complete 后，启动 GPU 监控。
+#   4. 启动压测。
+#   5. 压测结束后，再手动运行 summarize.py 汇总结果。
+
+
+###############################################################################
+# 第 0 步：可选，停止上一轮旧 vLLM / GPU 监控进程
+###############################################################################
+
+# 进入项目目录。
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+# 如果旧 vLLM 的 pid 文件存在，就停止旧 vLLM 进程。
+# 注意：这里不会删除任何文件，只会 kill pid 文件里记录的那个进程。
+if [ -f results/vllm_tp2_nohup/vllm.pid ]; then
+  kill "$(cat results/vllm_tp2_nohup/vllm.pid)"
+fi
+
+# 如果旧 GPU 监控的 pid 文件存在，就停止旧 GPU 监控进程。
+if [ -f results/vllm_tp2_nohup/gpu_monitor.pid ]; then
+  kill "$(cat results/vllm_tp2_nohup/gpu_monitor.pid)"
+fi
+
+
+###############################################################################
+# 第 1 步：启动 vLLM 服务
+###############################################################################
+
+# 直接复制下面这一整段执行即可。
+# 这里把 mkdir 和日志重定向都放进 nohup 内部，避免外层 shell 因为日志目录不存在而启动失败。
+nohup bash -lc '
+mkdir -p /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/logs
+exec > /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/logs/vllm.log 2>&1
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-vllm
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+export MODEL_ID=/home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+export SERVED_NAME=deepseek-r1-distill-qwen-14b
+
+VLLM_USE_FLASHINFER_SAMPLER=0 CUDA_VISIBLE_DEVICES=0,1 vllm serve "$MODEL_ID" \
+  --served-model-name "$SERVED_NAME" \
+  --host 0.0.0.0 \
+  --port 8105 \
+  --dtype bfloat16 \
+  --max-model-len 9216 \
+  --gpu-memory-utilization 0.92 \
+  --tensor-parallel-size 2 \
+  --enable-prefix-caching \
+  --disable-custom-all-reduce
+' &
+
+echo $! > /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/vllm.pid
+
+
+###############################################################################
+# 第 2 步：确认 vLLM 服务是否启动成功
+###############################################################################
+
+# 查看 vLLM 启动日志。
+# 看到 Application startup complete 后，说明服务已经启动完成。
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/logs/vllm.log
+
+# 也可以用下面的命令确认 8105 端口是否已经监听。
+ss -ltnp | grep ':8105'
+
+
+###############################################################################
+# 第 3 步：启动 GPU 监控
+###############################################################################
+
+# 进入项目目录。
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+# 确保日志目录存在。
+mkdir -p results/vllm_tp2_nohup_8192fix/logs
+
+# 使用 nohup 后台启动 GPU 监控。
+# 监控数据会写入 results/vllm_tp2_nohup_8192fix/gpu_metrics.csv。
+nohup bash -lc '
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-vllm
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+python scripts/gpu_monitor.py \
+  --output results/vllm_tp2_nohup_8192fix/gpu_metrics.csv \
+  --interval 1 \
+  --label vllm_tp2_8192fix
+' > results/vllm_tp2_nohup_8192fix/logs/gpu_monitor.log 2>&1 &
+
+# 记录 GPU 监控进程号。
+echo $! > results/vllm_tp2_nohup_8192fix/gpu_monitor.pid
+
+
+###############################################################################
+# 第 4 步：启动压测
+###############################################################################
+
+# 进入项目目录。
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+# 确保日志目录存在。
+mkdir -p results/vllm_tp2_nohup_8192fix/logs
+
+# 使用 nohup 后台启动压测。
+# 压测结果会写入 results/vllm_tp2_nohup_8192fix。
+nohup bash -lc '
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-vllm
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+python scripts/benchmark.py \
+  --framework vllm_tp2 \
+  --output-dir results/vllm_tp2_nohup_8192fix
+' > results/vllm_tp2_nohup_8192fix/logs/benchmark.log 2>&1 &
+
+# 记录压测进程号。
+echo $! > results/vllm_tp2_nohup_8192fix/benchmark.pid
+
+
+###############################################################################
+# 第 5 步：查看压测运行状态
+###############################################################################
+
+# 查看压测日志。
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/logs/benchmark.log
+
+# 查看 GPU 状态。
+nvidia-smi
+
+# 查看 vLLM 进程、GPU 监控进程、压测进程是否还在运行。
+cd /home/oem/llmDeploy/llm-benchmark-kit
+
+ps -p "$(cat results/vllm_tp2_nohup_8192fix/vllm.pid)" -o pid,ppid,stat,etime,cmd
+ps -p "$(cat results/vllm_tp2_nohup_8192fix/gpu_monitor.pid)" -o pid,ppid,stat,etime,cmd
+ps -p "$(cat results/vllm_tp2_nohup_8192fix/benchmark.pid)" -o pid,ppid,stat,etime,cmd
+
+
+###############################################################################
+# 第 6 步：压测结束后，手动汇总结果
+###############################################################################
+
+# 注意：
+#   请等 benchmark.py 跑完以后再执行 summarize.py。
+#   如果压测还没结束就汇总，结果会不完整。
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-vllm
+
+python scripts/summarize.py --results-dir results/vllm_tp2_nohup_8192fix
+
+
+###############################################################################
+# 额外说明：如果 9216 启动时报显存不足
+###############################################################################
+
+# 如果 vLLM 日志里出现显存不足或者 KV cache 不够，可以把启动命令中的：
+#   --max-model-len 9216
+# 改成：
+#   --max-model-len 8704
+#
+# 8704 仍然大于 8192 + 256 = 8448，可以避免 8192 输入场景因为上下文总长度超限报错。

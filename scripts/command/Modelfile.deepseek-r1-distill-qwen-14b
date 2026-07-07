@@ -1,0 +1,3 @@
+FROM /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+
+PARAMETER num_ctx 4096

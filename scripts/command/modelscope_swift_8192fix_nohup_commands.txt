@@ -1,0 +1,117 @@
+# ModelScope ms-swift 14B 压测启动说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用 ModelScope 生态的 ms-swift 部署
+#   DeepSeek-R1-Distill-Qwen-14B，并跑和 vLLM / SGLang / LMDeploy 相同的压测场景。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本轮结果保存路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix
+#
+# 框架配置名：
+#   modelscope_swift
+#
+# 服务端口：
+#   8103
+#
+# 重要说明：
+#   这里使用 swift deploy --infer-backend transformers。
+#   这是为了让 ModelScope 作为独立生态基线测试，不借用 vLLM / SGLang / LMDeploy 后端。
+#   因此它的吞吐大概率会明显低于 vLLM、SGLang、LMDeploy。
+#
+# 为什么 max-model-len 使用 8704：
+#   压测中包含 8192 输入 + 256 输出的长上下文场景。
+#   8192 + 256 = 8448，所以这里使用 8704，留出少量余量。
+#
+# 为什么使用双卡：
+#   DeepSeek-R1-Distill-Qwen-14B BF16 权重单卡 24G 很难完整装下。
+#   这里通过 CUDA_VISIBLE_DEVICES=0,1 和 --device-map auto 让 transformers 自动切分到两张卡。
+#
+# 推荐执行顺序：
+#   1. 确认 vLLM / SGLang / LMDeploy 服务已经停止，释放两张 GPU 显存。
+#   2. 启动 ModelScope ms-swift 服务。
+#   3. 等日志显示服务启动完成后，启动 GPU 监控。
+#   4. 启动 benchmark.py 压测。
+#   5. 压测结束后运行 summarize.py 汇总。
+
+
+###############################################################################
+# 第 0 步：确认 GPU 显存已释放
+###############################################################################
+
+nvidia-smi
+
+# 如果看到旧服务仍占用 22000MiB 左右显存，请先停止旧服务。
+# 可以用下面命令查找相关进程：
+ps -ef | grep -E "vllm|sglang|lmdeploy|swift|api_server|Worker_TP|EngineCore" | grep -v grep
+
+
+###############################################################################
+# 第 1 步：启动 ModelScope ms-swift 服务
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_modelscope_swift_8192fix.sh
+
+# 查看 ModelScope 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix/logs/modelscope.log
+
+# 确认 8103 端口是否监听：
+ss -ltnp | grep ':8103'
+
+# 确认 OpenAI-compatible /v1/models 是否正常：
+curl -s http://127.0.0.1:8103/v1/models
+
+
+###############################################################################
+# 第 2 步：启动 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_modelscope_swift_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3 步：启动 ModelScope 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_modelscope_swift_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4 步：压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-modelscope
+
+python scripts/summarize.py --results-dir results/modelscope_swift_nohup_8192fix
+
+
+###############################################################################
+# 常见问题
+###############################################################################
+
+# 1. 如果启动时报端口 8103 被占用：
+#    用下面命令查看占用进程：
+#      ss -ltnp | grep ':8103'
+#
+# 2. 如果启动时报显存不足：
+#    先确认 vLLM / SGLang / LMDeploy 是否还占着显存：
+#      nvidia-smi
+#    如果仍然 OOM，可以考虑先用 ModelScope 4bit 方案重测，
+#    或跳过 8192 长上下文，只保留短上下文基线。
+#
+# 3. 如果启动后压测很慢：
+#    这是正常现象。当前脚本刻意使用 transformers 后端，
+#    目的是测 ModelScope/HF 原生基线，不是高性能推理引擎。

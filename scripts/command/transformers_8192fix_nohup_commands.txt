@@ -1,0 +1,158 @@
+# Transformers 14B 压测启动说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用 Hugging Face Transformers + 项目内置
+#   FastAPI OpenAI-compatible wrapper 部署 DeepSeek-R1-Distill-Qwen-14B。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本说明包含两组 Transformers 基线：
+#
+#   1. transformers_bf16
+#      - 端口：8101
+#      - 结果目录：/home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix
+#      - GPU：CUDA_VISIBLE_DEVICES=0,1
+#      - 定位：原生 HF Transformers BF16 双卡基线。
+#
+#   2. transformers_bnb4
+#      - 端口：8102
+#      - 结果目录：/home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bnb4_nohup_8192fix
+#      - GPU：CUDA_VISIBLE_DEVICES=1
+#      - 定位：bitsandbytes 4bit 显存友好基线。
+#
+# 重要说明：
+#   Transformers 不是专用高吞吐推理引擎，没有 vLLM / SGLang / LMDeploy 那样成熟的
+#   continuous batching、KV cache 管理和张量并行调度能力。
+#   因此它的压测结果主要作为“原生 PyTorch/HF 基线”，不应作为生产首选。
+#
+#   BF16 版本使用 device_map=auto 自动切分到双卡。它可能可以启动，但长上下文和高并发
+#   很容易显存吃紧或速度很慢。
+#
+#   BNB4 版本使用单卡 4bit 量化，显存压力小，但不是和 BF16 权重的公平性能对比。
+
+
+###############################################################################
+# 第 0 步：确认 GPU 显存已释放
+###############################################################################
+
+nvidia-smi
+
+# 如果看到旧服务仍占用 22000MiB 左右显存，请先停止旧服务。
+# 可以用下面命令查找相关进程：
+ps -ef | grep -E "vllm|sglang|lmdeploy|swift|deepspeed|transformers_openai_server|api_server|Worker_TP|EngineCore" | grep -v grep
+
+
+###############################################################################
+# 第 1A 步：启动 Transformers BF16 服务
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bf16_8192fix.sh
+
+# 查看 Transformers BF16 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix/logs/transformers.log
+
+# 确认 8101 端口是否监听：
+ss -ltnp | grep ':8101'
+
+# 确认 OpenAI-compatible /v1/models 是否正常：
+curl -s http://127.0.0.1:8101/v1/models
+
+
+###############################################################################
+# 第 2A 步：启动 Transformers BF16 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bf16_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3A 步：启动 Transformers BF16 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bf16_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4A 步：BF16 压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-transformers
+
+python scripts/summarize.py --results-dir results/transformers_bf16_nohup_8192fix
+
+
+###############################################################################
+# 第 1B 步：启动 Transformers BNB4 服务
+###############################################################################
+
+# 注意：请先停止 BF16 服务并确认显存释放，再启动 BNB4。
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bnb4_8192fix.sh
+
+# 查看 Transformers BNB4 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bnb4_nohup_8192fix/logs/transformers.log
+
+# 确认 8102 端口是否监听：
+ss -ltnp | grep ':8102'
+
+# 确认 OpenAI-compatible /v1/models 是否正常：
+curl -s http://127.0.0.1:8102/v1/models
+
+
+###############################################################################
+# 第 2B 步：启动 Transformers BNB4 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bnb4_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bnb4_nohup_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3B 步：启动 Transformers BNB4 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_transformers_bnb4_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bnb4_nohup_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4B 步：BNB4 压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-transformers
+
+python scripts/summarize.py --results-dir results/transformers_bnb4_nohup_8192fix
+
+
+###############################################################################
+# 常见问题
+###############################################################################
+
+# 1. 如果 BF16 启动时报显存不足：
+#    Transformers BF16 + device_map=auto 没有专用推理引擎的显存优化能力。
+#    可以把 BF16 记录为“启动失败或不适合作为生产推理方案”，然后测试 BNB4。
+#
+# 2. 如果压测很慢：
+#    这是正常现象。Transformers wrapper 是原生 HF/PyTorch 基线，不是高性能服务框架。
+#
+# 3. 如果 8192 长上下文失败：
+#    这也符合预期。Transformers wrapper 没有 vLLM/LMDeploy 那类 KV cache 显存比例控制。
+#    可以保留短上下文结果，把长上下文失败作为框架能力差异记录。

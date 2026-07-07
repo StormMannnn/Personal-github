@@ -1,0 +1,161 @@
+# SGLang TP=2 14B 压测启动说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用 SGLang 部署
+#   DeepSeek-R1-Distill-Qwen-14B，并跑和 vLLM 相同的压测场景。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本轮结果保存路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix
+#
+# 框架配置名：
+#   sglang_tp2
+#
+# 服务端口：
+#   8109
+#
+# 为什么 context-length 使用 9216：
+#   压测中包含 8192 输入 + 256 输出的长上下文场景。
+#   如果上下文只开 8192，总长度会超过服务端限制。
+#   所以 SGLang 这里也使用 --context-length 9216。
+#
+# 为什么禁用 FlashInfer：
+#   当前服务器的 RTX 5090 是 SM 12.x，SGLang 默认使用 flashinfer 后端时，
+#   日志中会出现 FlashInfer / CUDA arch 检测失败，并在 CUDA graph capture 阶段退出。
+#   因此启动脚本显式使用：
+#     --attention-backend triton
+#     --sampling-backend pytorch
+#
+# 为什么禁用 custom all-reduce：
+#   双 5090 没有 NVLink/P2P，日志中会提示 peer access is not supported。
+#   因此启动脚本加入：
+#     --disable-custom-all-reduce
+#
+# 为什么设置 CUDA_HOME/PATH：
+#   服务器系统默认 /usr/local/cuda 指向 CUDA 12.1，nvcc 不支持 RTX 5090 的 compute_120。
+#   llm-sglang 环境内带有 CUDA 13.2 nvcc，可以编译 compute_120。
+#   因此启动脚本强制使用：
+#     $CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cu13/bin/nvcc
+#
+# 为什么设置 CPATH/CPLUS_INCLUDE_PATH：
+#   CUDA 13 的 cuda_fp16.h 会包含 <nv/target>。
+#   当前 pip 安装的 CUDA 13 头文件目录里没有这个 CCCL 头文件，
+#   但 flashinfer 包内带有：
+#     $CONDA_PREFIX/lib/python3.10/site-packages/flashinfer/data/cccl/libcudacxx/include/nv/target
+#   因此启动脚本把这个目录加入 CPATH 和 CPLUS_INCLUDE_PATH。
+#
+# 为什么创建 libcudart.so 软链接：
+#   SGLang JIT 链接阶段会使用 -lcudart，并固定到 $CUDA_HOME/lib64 查找。
+#   pip 安装的 CUDA 13 runtime 里实际文件名是 libcudart.so.13，目录是 $CUDA_HOME/lib。
+#   因此启动脚本会在 $CUDA_HOME/lib64 下创建：
+#     libcudart.so -> $CUDA_HOME/lib/libcudart.so.13
+#
+# 推荐执行顺序：
+#   1. 确认 vLLM 服务已经停止，释放两张 GPU 显存。
+#   2. 启动 SGLang 服务。
+#   3. 等 SGLang 日志显示服务启动完成后，启动 GPU 监控。
+#   4. 启动 benchmark.py 详细并发压测。
+#      脚本会先检查 /v1/models；如果服务已挂，会立即停止，不再把全部场景打成连接失败。
+#   5. 压测结束后运行 summarize.py 汇总。
+
+
+###############################################################################
+# 第 0 步：确认 GPU 显存已释放
+###############################################################################
+
+nvidia-smi
+
+# 如果看到旧 vLLM 仍占用 22000MiB 左右显存，请先停止旧 vLLM。
+# 可以用下面命令查找相关进程：
+ps -ef | grep -E "vllm|sglang|launch_server|EngineCore|Worker_TP" | grep -v grep
+
+
+###############################################################################
+# 第 1 步：启动 SGLang TP=2 服务
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_sglang_tp2_8192fix.sh
+
+# 查看 SGLang 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix/logs/sglang.log
+
+# 确认 8109 端口是否监听：
+ss -ltnp | grep ':8109'
+
+
+###############################################################################
+# 第 2 步：启动 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_sglang_tp2_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3 步：启动 SGLang 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_sglang_tp2_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4 步：压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-sglang
+
+python scripts/summarize.py --results-dir results/sglang_tp2_detailed_8192fix
+
+
+###############################################################################
+# 常见问题
+###############################################################################
+
+# 1. 如果启动时报端口 8109 被占用：
+#    用下面命令查看占用进程：
+#      ss -ltnp | grep ':8109'
+#
+# 2. 如果启动时报显存不足：
+#    先确认 vLLM 是否还占着显存：
+#      nvidia-smi
+#    如果显存已经释放但 SGLang 仍然 OOM，可以把脚本里的：
+#      --mem-fraction-static 0.88
+#    改成：
+#      --mem-fraction-static 0.84
+#
+# 3. 如果日志出现 FlashInfer requires GPUs with sm75 or higher：
+#    确认启动脚本里有：
+#      --attention-backend triton
+#      --sampling-backend pytorch
+#
+# 4. 如果日志出现 Unsupported gpu architecture 'compute_120'：
+#    说明 SGLang 调用了系统 CUDA 12.1 的 nvcc。
+#    确认启动脚本里设置了：
+#      CUDA_HOME=$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cu13
+#      PATH=$CUDA_HOME/bin:$PATH
+#
+# 5. 如果日志出现 fatal error: nv/target: 没有那个文件或目录：
+#    确认启动脚本里设置了：
+#      CCCL_INCLUDE=$CONDA_PREFIX/lib/python3.10/site-packages/flashinfer/data/cccl/libcudacxx/include
+#      CPATH=$CCCL_INCLUDE:$CUDA_INCLUDE:$CPATH
+#      CPLUS_INCLUDE_PATH=$CCCL_INCLUDE:$CUDA_INCLUDE:$CPLUS_INCLUDE_PATH
+#
+# 6. 如果日志出现 /usr/bin/ld: 找不到 -lcudart：
+#    确认启动脚本已经创建：
+#      $CUDA_HOME/lib64/libcudart.so
+#
+# 7. 如果 8192 输入仍然因为上下文限制失败：
+#    确认 SGLang 启动命令里有：
+#      --context-length 9216

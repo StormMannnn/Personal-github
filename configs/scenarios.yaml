@@ -1,0 +1,65 @@
+defaults:
+  repetitions: 3
+  timeout_seconds: 180
+  warmup_requests: 8
+  temperature: 0.0
+  top_p: 1.0
+  stream: true
+
+scenarios:
+  latency_256_128:
+    description: "Single-user latency baseline."
+    concurrency: [1]
+    num_requests: 32
+    input_tokens: 256
+    max_tokens: 128
+  chat_512_256:
+    description: "Common chat/RAG interaction load."
+    concurrency: [4, 8, 16, 32]
+    num_requests: 128
+    input_tokens: 512
+    max_tokens: 256
+  saturation_512_256:
+    description: "Increase concurrency until error rate >1% or p95 TTFT >3s."
+    concurrency: [1, 2, 4, 8, 16, 32, 48, 64]
+    num_requests: 192
+    input_tokens: 512
+    max_tokens: 256
+    stop_on_error_rate_gt: 0.01
+    stop_on_ttft_p95_ms_gt: 3000
+  long_context_4096_256:
+    description: "Long context at 4K input tokens."
+    concurrency: [1, 4, 8]
+    num_requests: 48
+    input_tokens: 4096
+    max_tokens: 256
+  long_context_8192_256:
+    description: "Long context at 8K input tokens."
+    concurrency: [1, 2, 4]
+    num_requests: 24
+    input_tokens: 8192
+    max_tokens: 256
+  prefix_cache_4096_256:
+    description: "Shared prefix with changing user question."
+    concurrency: [1, 8, 16]
+    num_requests: 96
+    input_tokens: 4096
+    max_tokens: 256
+    shared_prefix_ratio: 0.85
+  structured_json_512_256:
+    description: "JSON schema output validity and serving performance."
+    concurrency: [1, 8, 16]
+    num_requests: 96
+    input_tokens: 512
+    max_tokens: 256
+    json_mode: true
+
+quality_sample:
+  description: "Manual quality smoke test; not used for throughput ranking."
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 512
+  prompts:
+    - "请用中文解释企业 RAG 系统中向量召回和重排序的分工。"
+    - "给出一个高并发客服机器人推理服务的容量规划步骤。"
+    - "请输出 JSON，字段包括 methods、risks、recommendation，说明如何优化大模型推理延迟。"

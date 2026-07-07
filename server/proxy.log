@@ -1,0 +1,19 @@
+INFO:     Started server process [197208]
+INFO:     Waiting for application startup.
+2026-07-06 16:49:16,446 [INFO] 流式代理启动 — 监听 0.0.0.0:8001, 上游 http://127.0.0.1:8000/v1/chat/completions
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50560 - "POST /ask HTTP/1.1" 200 OK
+2026-07-06 16:49:27,029 [INFO] HTTP Request: POST http://127.0.0.1:8000/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:39766 - "POST /ask HTTP/1.1" 200 OK
+2026-07-06 16:49:40,676 [INFO] HTTP Request: POST http://127.0.0.1:8000/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:     192.168.185.83:51932 - "POST /ask HTTP/1.1" 200 OK
+2026-07-06 16:52:26,357 [INFO] HTTP Request: POST http://127.0.0.1:8000/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:     192.168.185.83:52583 - "POST /ask HTTP/1.1" 200 OK
+2026-07-06 17:03:12,183 [INFO] HTTP Request: POST http://127.0.0.1:8000/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:     192.168.185.83:53448 - "POST /ask HTTP/1.1" 422 Unprocessable Entity
+INFO:     192.168.185.83:53496 - "POST /ask HTTP/1.1" 422 Unprocessable Entity
+INFO:     192.168.185.83:53521 - "POST /ask HTTP/1.1" 422 Unprocessable Entity
+INFO:     192.168.185.83:53562 - "POST /ask HTTP/1.1" 422 Unprocessable Entity
+INFO:     192.168.185.83:53579 - "POST /ask HTTP/1.1" 200 OK
+2026-07-06 17:21:04,998 [INFO] HTTP Request: POST http://127.0.0.1:8000/v1/chat/completions "HTTP/1.1 200 OK"

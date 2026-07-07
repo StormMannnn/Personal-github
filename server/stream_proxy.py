@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""vLLM 流式代理 — 简化 SSE、隐藏思考链、零鉴权，供内网直接 curl 调用。"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+# ── 配置 ─────────────────────────────────────────────────────────
+VLLM_URL = "http://127.0.0.1:8000/v1/chat/completions"
+VLLM_HEALTH = "http://127.0.0.1:8000/health"
+MODEL_NAME = "Qwen3.6-35B-A3B"
+PROXY_PORT = 8001
+LOG_LEVEL = logging.INFO
+
+# ── 日志 ─────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger("proxy")
+
+# ── 请求模型 ─────────────────────────────────────────────────────
+class AskRequest(BaseModel):
+    question: str = Field(..., description="用户问题")
+    temperature: float = Field(0.7, ge=0.0, le=2.0, description="采样温度")
+    max_tokens: int = Field(1024, ge=1, le=32768, description="最大输出 token 数")
+    think: bool = Field(False, description="是否输出思考链，默认否")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  生成简化 SSE 事件流
+# ══════════════════════════════════════════════════════════════════
+async def generate_sse(payload: dict, upstream_timeout: float = 180.0):
+    """流式请求 vLLM，逐行解析上游 SSE，吐出简化事件。"""
+    t_start = time.monotonic()
+    total_tokens = 0
+    prompt_tokens = 0
+    finish_reason = "unknown"
+    chunk_count = 0
+    error_msg = ""
+    connection_error = False
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(upstream_timeout)) as client:
+        try:
+            async with client.stream(
+                "POST",
+                VLLM_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    error_msg = f"vLLM 返回 HTTP {resp.status_code}: {error_text.decode()[:500]}"
+                    yield f"data: {json.dumps({'event': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]  # 去掉 "data: "
+                    if data_str.strip() == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        log.warning("跳过无法解析的上游分片: %s", data_str[:120])
+                        continue
+
+                    # 先提取可能存在的 usage 字段（可能在 choices 为空的块里）
+                    if "usage" in chunk:
+                        usage_data = chunk["usage"]
+                        total_tokens = usage_data.get("total_tokens", 0)
+                        prompt_tokens = usage_data.get("prompt_tokens", 0)
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        # 只有 usage 没有内容的块（stream_options.include_usage=true 产生）
+                        continue
+
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    reasoning = delta.get("reasoning_content", "")  # vLLM 目前无此字段,预留
+
+                    # 根据 think 开关决定输出什么
+                    text = reasoning + content if reasoning else content
+                    if not text:
+                        continue
+
+                    chunk_count += 1
+
+                    # 简化事件：只保留必要字段,去掉 null
+                    event = {
+                        "t": text,  # token 内容
+                    }
+                    # 首个分片标注事件类型
+                    if chunk_count == 1:
+                        event["event"] = "start"
+
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                # ── finish_reason 从最后一个带 choices 的块取 ──
+                try:
+                    finish_reason = chunk.get("choices", [{}])[0].get("finish_reason", "stop")  # noqa: F821
+                except Exception:
+                    finish_reason = "stop"
+
+        except httpx.ConnectError:
+            connection_error = True
+            error_msg = "无法连接到 vLLM 服务 (127.0.0.1:8000)，请确认 vLLM 是否已启动"
+        except httpx.ReadTimeout:
+            error_msg = f"vLLM 响应超时 ({upstream_timeout}s)"
+        except httpx.RemoteProtocolError:
+            error_msg = "vLLM 连接意外断开"
+        except Exception as exc:
+            error_msg = f"代理内部错误: {type(exc).__name__}: {exc}"
+
+    if error_msg:
+        log.error(error_msg)
+        yield f"data: {json.dumps({'event': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
+
+    # ── 结束事件：附 token 统计 ──
+    elapsed = time.monotonic() - t_start
+    end_event = {
+        "event": "end",
+        "finish_reason": finish_reason,
+        "elapsed_s": round(elapsed, 2),
+        "chunks": chunk_count,
+    }
+    if total_tokens > 0:
+        end_event["total_tokens"] = total_tokens
+        end_event["prompt_tokens"] = prompt_tokens
+        end_event["completion_tokens"] = total_tokens - prompt_tokens
+
+    yield f"data: {json.dumps(end_event, ensure_ascii=False)}\n\n"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  生成纯文本流（像 Claude 一样逐字吐出，无 SSE/JSON 包装）
+# ══════════════════════════════════════════════════════════════════
+async def generate_text(payload: dict, upstream_timeout: float = 180.0):
+    """流式请求 vLLM，逐行解析上游 SSE，只 yield 纯文本 content。"""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(upstream_timeout)) as client:
+        try:
+            async with client.stream(
+                "POST", VLLM_URL, json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    yield f"[错误] vLLM HTTP {resp.status_code}: {body.decode()[:300]}"
+                    return
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
+        except httpx.ConnectError:
+            yield "[错误] 无法连接 vLLM (127.0.0.1:8000)，请确认服务是否启动"
+        except httpx.ReadTimeout:
+            yield f"[错误] vLLM 响应超时 ({upstream_timeout}s)"
+        except httpx.RemoteProtocolError:
+            yield "[错误] vLLM 连接意外断开"
+        except Exception as exc:
+            yield f"[错误] 代理内部错误: {type(exc).__name__}: {exc}"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  FastAPI 应用
+# ══════════════════════════════════════════════════════════════════
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("流式代理启动 — 监听 0.0.0.0:%d, 上游 %s", PROXY_PORT, VLLM_URL)
+    yield
+    log.info("流式代理关闭")
+
+app = FastAPI(title="vLLM Stream Proxy", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health():
+    """探测上游 vLLM 是否在线。"""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+        try:
+            resp = await client.get(VLLM_HEALTH)
+            vllm_ok = resp.status_code == 200
+        except Exception:
+            vllm_ok = False
+    return JSONResponse({
+        "proxy": "ok",
+        "vllm": "up" if vllm_ok else "down",
+        "model": MODEL_NAME,
+    })
+
+
+@app.post("/ask")
+async def ask(req: AskRequest):
+    """流式问答。返回 text/event-stream, 逐字吐出简化事件。"""
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": req.question}],
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "top_p": 0.9,
+        "top_k": 20,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "chat_template_kwargs": {"enable_thinking": req.think},
+    }
+    return StreamingResponse(
+        generate_text(payload),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",       # 禁用 nginx 缓冲
+        },
+    )
+
+
+@app.get("/")
+async def root():
+    return JSONResponse({
+        "service": "vLLM Stream Proxy",
+        "model": MODEL_NAME,
+        "endpoints": {
+            "POST /ask": "流式问答 (question, temperature, max_tokens, think)",
+            "GET /health": "健康检查",
+        },
+    })
+
+
+# ── 直接运行 ─────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PROXY_PORT, log_level="info")

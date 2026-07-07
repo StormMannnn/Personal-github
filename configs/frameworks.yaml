@@ -1,0 +1,65 @@
+model:
+  hf_id: /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+  served_name: deepseek-r1-distill-qwen-14b
+  max_model_len: 8192
+  dtype: bfloat16
+  recommended_gpu:
+    single_card_quantized: "CUDA_VISIBLE_DEVICES=1"
+    dual_card_bf16: "CUDA_VISIBLE_DEVICES=0,1"
+
+frameworks:
+  transformers_bf16:
+    kind: openai
+    base_url: http://127.0.0.1:8101/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "HF Transformers + FastAPI wrapper, BF16 baseline. Use both RTX 5090 cards."
+  transformers_bnb4:
+    kind: openai
+    base_url: http://127.0.0.1:8102/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "HF Transformers + FastAPI wrapper, bitsandbytes 4-bit baseline. Single RTX 5090 should work."
+  modelscope_swift:
+    kind: openai
+    base_url: http://127.0.0.1:8103/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "ModelScope ms-swift deploy with transformers backend."
+  vllm_tp1:
+    kind: openai
+    base_url: http://127.0.0.1:8104/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "vLLM single RTX 5090. Prefer quantized/AWQ/GPTQ model if BF16 OOMs."
+  vllm_tp2:
+    kind: openai
+    base_url: http://127.0.0.1:8105/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "vLLM tensor parallel across both RTX 5090 cards. Recommended BF16 baseline."
+  lmdeploy_tp1:
+    kind: openai
+    base_url: http://127.0.0.1:8106/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "LMDeploy TurboMind single RTX 5090. Prefer 4-bit if BF16 OOMs."
+  lmdeploy_tp2:
+    kind: openai
+    base_url: http://127.0.0.1:8107/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "LMDeploy TurboMind tensor parallel across both RTX 5090 cards."
+  ollama_deepseek_r1_distill_qwen_14b:
+    kind: ollama
+    base_url: http://127.0.0.1:11434
+    model: deepseek-r1-distill-qwen-14b
+    notes: "Ollama model created from /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B. Conservative low-concurrency benchmark only; not a high-concurrency serving baseline."
+  sglang_tp1:
+    kind: openai
+    base_url: http://127.0.0.1:8108/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "SGLang single RTX 5090. Prefer quantized model if BF16 OOMs."
+  sglang_tp2:
+    kind: openai
+    base_url: http://127.0.0.1:8109/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "SGLang tensor parallel across both RTX 5090 cards. Recommended BF16 baseline."
+  deepspeed_tp2:
+    kind: openai
+    base_url: http://127.0.0.1:8110/v1
+    model: deepseek-r1-distill-qwen-14b
+    notes: "DeepSpeed inference wrapper across both RTX 5090 cards."

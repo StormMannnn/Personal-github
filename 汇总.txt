@@ -1,0 +1,683 @@
+双 RTX 5090 大模型推理框架测试汇总
+====================================
+
+生成日期：2026-07-03
+项目路径：/home/oem/llmDeploy/llm-benchmark-kit
+主测模型：/home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+模型名称：DeepSeek-R1-Distill-Qwen-14B
+服务器：双 NVIDIA GeForce RTX 5090 24G
+主要目标：评估企业高并发推理服务部署方案
+
+
+一、总体结论
+------------
+
+本轮测试已经足够支撑企业推理服务选型：
+
+1. 生产首选：vLLM
+   - 完整压测成功。
+   - 高并发吞吐最高。
+   - saturation_512_256 并发 64 下输出吞吐约 2554.6 output tok/s。
+   - 错误率 0%，8192 长上下文通过。
+
+2. 生产备选：LMDeploy
+   - 完整压测成功。
+   - 吞吐接近 vLLM，稳定性很好。
+   - saturation_512_256 并发 64 下输出吞吐约 2296.4 output tok/s。
+   - 错误率 0%，8192 长上下文通过。
+
+3. 生产备选：SGLang
+   - 完整压测成功。
+   - 稳定性很好，但高并发吞吐低于 vLLM 和 LMDeploy。
+   - saturation_512_256 并发 80 下输出吞吐约 1575.0 output tok/s。
+   - 错误率 0%，8192 长上下文通过。
+
+4. 不推荐作为高并发生产方案：ModelScope、Transformers
+   - ModelScope 使用 ms-swift + transformers 后端，能跑，但吞吐非常低，并发 32 失败率明显升高。
+   - Transformers BF16 能跑，但已经连续跑约 22 小时仍未完成完整压测，吞吐过低，继续跑完没有选型价值。
+
+5. 启动失败：DeepSpeed
+   - DeepSpeed 最小 wrapper 在 14B BF16 上启动失败，CUDA OOM。
+   - 根因是 Transformers device_map=auto 与 deepspeed.init_inference 的二次模型搬运冲突。
+   - 失败详情已记录在：
+     /home/oem/llmDeploy/llm-benchmark-kit/scripts/failure/deepspeed_tp2_14b_bf16_oom_failure.md
+
+6. 不纳入企业高并发生产排名：Ollama
+   - Ollama 更适合作为本地易用性、桌面调用、轻量运维对照。
+   - 当前企业高并发推理部署不需要 Ollama 的功能。
+   - 项目中存在一次 conservative 结果，但请求全失败，不作为正式性能结果。
+
+
+二、最终推荐
+------------
+
+如果目标是企业中文问答、客服、RAG、高并发推理服务：
+
+推荐优先级：
+
+1. vLLM
+2. LMDeploy
+3. SGLang
+
+建议落地方式：
+
+- 第一生产候选：vLLM TP=2
+- 第二生产候选：LMDeploy TP=2
+- 第三候选或特定场景候选：SGLang TP=2
+
+不建议继续投入高并发生产测试：
+
+- Transformers：原生基线，不适合作为高并发服务框架。
+- ModelScope：生态集成有价值，但 transformers 后端吞吐太低。
+- DeepSpeed：当前 wrapper 不适合 14B BF16 部署。
+- Ollama：不面向企业高并发推理服务。
+
+
+三、核心指标含义
+----------------
+
+1. requests
+   - 本轮场景发出的请求总数。
+
+2. success
+   - 成功返回的请求数。
+
+3. error_rate
+   - 失败请求比例。
+   - 计算方式大致为：失败请求数 / 总请求数。
+   - 企业生产中应重点关注，通常应接近 0。
+
+4. requests_per_s
+   - 每秒完成的请求数。
+   - 适合衡量服务能承载多少并发请求。
+
+5. output_tokens_per_s
+   - 每秒生成的输出 token 数。
+   - 这是大模型推理吞吐最重要的指标之一。
+   - 对聊天、RAG、客服这类输出型业务，通常比 requests/s 更关键。
+
+6. total_tokens_per_s
+   - 每秒处理的总 token 数。
+   - 包括输入 token 和输出 token。
+   - 长上下文场景中，这个指标能体现 prefill 能力。
+
+7. latency_p50_ms / latency_p95_ms / latency_p99_ms
+   - 端到端延迟分位数。
+   - p50 表示一半请求低于该延迟。
+   - p95 表示 95% 请求低于该延迟。
+   - p99 表示 99% 请求低于该延迟。
+   - 企业服务通常重点看 p95 和 p99，而不是平均值。
+
+8. ttft_p50_ms / ttft_p95_ms / ttft_p99_ms
+   - TTFT = Time To First Token，首 token 延迟。
+   - 表示从请求发出到模型返回第一个 token 的时间。
+   - 流式输出服务中，TTFT 直接影响用户感知速度。
+
+9. output_tokens_mean
+   - 平均每个请求实际生成的 token 数。
+   - 本轮多数场景固定 max_tokens=256，因此该值接近 256 时说明输出长度比较一致。
+
+10. json_valid_rate
+    - 结构化 JSON 场景中，模型输出能被解析成合法 JSON 的比例。
+    - 本轮 DeepSeek-R1-Distill 这类推理模型容易输出思考或解释文本，因此 JSON 有效率偏低不能直接代表服务框架失败。
+    - 如果生产需要稳定 JSON，应单独测试 guided decoding、response format 或更强约束 prompt。
+
+11. gpu_util_avg_pct / gpu_util_peak_pct
+    - GPU 平均利用率和峰值利用率。
+    - 利用率高不一定代表性能好，还要结合吞吐和延迟看。
+
+12. memory_peak_mib
+    - GPU 峰值显存占用。
+    - 对双 5090 24G 来说，超过 22GB 就已经非常接近上限。
+
+13. power_avg_w
+    - GPU 平均功耗。
+    - 可用于粗略估算 tokens/W。
+
+14. temperature_peak_c
+    - GPU 峰值温度。
+    - 本轮 GPU0 多次达到 89C 到 92C，建议生产部署时关注散热和风道。
+
+
+四、框架结果汇总
+----------------
+
+1. vLLM TP=2
+~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix
+
+状态：
+- 完整压测成功。
+- 总请求数：8616
+- 成功数：8616
+- 失败数：0
+- 错误率：0%
+
+关键性能：
+
+- latency_256_128，并发 1：
+  - output_tokens_per_s：70.8
+  - latency_p95_ms：1824.6
+  - ttft_p95_ms：31.9
+
+- chat_512_256，并发 32：
+  - requests_per_s：6.1381
+  - output_tokens_per_s：1571.2
+  - total_tokens_per_s：4713.9
+  - latency_p95_ms：5254.1
+  - ttft_p95_ms：265.6
+
+- saturation_512_256，并发 64：
+  - requests_per_s：9.9789
+  - output_tokens_per_s：2554.6
+  - total_tokens_per_s：7663.8
+  - latency_p95_ms：6816.8
+  - ttft_p95_ms：904.1
+  - error_rate：0%
+
+- long_context_8192_256，并发 4：
+  - output_tokens_per_s：104.8
+  - total_tokens_per_s：3459.9
+  - latency_p95_ms：10628.4
+  - ttft_p95_ms：3498.2
+  - error_rate：0%
+
+GPU 资源：
+
+- GPU0：
+  - 平均利用率：64.49%
+  - 峰值显存：23061 MiB
+  - 平均功耗：259.08 W
+  - 峰值温度：90C
+
+- GPU1：
+  - 平均利用率：64.45%
+  - 峰值显存：22876 MiB
+  - 平均功耗：242.07 W
+  - 峰值温度：65C
+
+结论：
+
+vLLM 是本轮综合表现最好的框架。吞吐最高，稳定性好，长上下文通过，OpenAI-compatible API 成熟，适合作为企业高并发推理服务首选。
+
+
+2. LMDeploy TP=2
+~~~~~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix
+
+状态：
+- 完整压测成功。
+- 总请求数：8616
+- 成功数：8616
+- 失败数：0
+- 错误率：0%
+
+关键性能：
+
+- latency_256_128，并发 1：
+  - output_tokens_per_s：59.8
+  - latency_p95_ms：2184.8
+  - ttft_p95_ms：37.8
+
+- chat_512_256，并发 32：
+  - requests_per_s：5.8444
+  - output_tokens_per_s：1496.3
+  - total_tokens_per_s：4488.7
+  - latency_p95_ms：5557.5
+  - ttft_p95_ms：346.7
+
+- saturation_512_256，并发 64：
+  - requests_per_s：8.9695
+  - output_tokens_per_s：2296.4
+  - total_tokens_per_s：6888.8
+  - latency_p95_ms：8081.9
+  - ttft_p95_ms：960.8
+  - error_rate：0%
+
+- long_context_8192_256，并发 4：
+  - output_tokens_per_s：116.4
+  - total_tokens_per_s：3842.6
+  - latency_p95_ms：9391.2
+  - ttft_p95_ms：2714.8
+  - error_rate：0%
+
+GPU 资源：
+
+- GPU0：
+  - 平均利用率：74.25%
+  - 峰值显存：22793 MiB
+  - 平均功耗：297.77 W
+  - 峰值温度：92C
+
+- GPU1：
+  - 平均利用率：74.36%
+  - 峰值显存：22607 MiB
+  - 平均功耗：283.98 W
+  - 峰值温度：67C
+
+结论：
+
+LMDeploy 表现非常接近 vLLM，吞吐略低但稳定性很好。它适合作为生产备选，尤其适合希望使用 TurboMind、LMDeploy 生态或后续做量化部署的场景。
+
+
+3. SGLang TP=2
+~~~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix
+
+状态：
+- 完整压测成功。
+- 总请求数：13152
+- 成功数：13152
+- 失败数：0
+- 错误率：0%
+- 本结果使用已经汇总好的 aggregate_summary.csv 和 gpu_summary.csv。
+
+关键性能：
+
+- latency_256_128，并发 1：
+  - output_tokens_per_s：73.4
+  - latency_p95_ms：1786.7
+  - ttft_p95_ms：34.2
+
+- chat_512_256，并发 64：
+  - requests_per_s：6.2068
+  - output_tokens_per_s：1588.9
+  - total_tokens_per_s：4766.8
+  - latency_p95_ms：10502.0
+  - ttft_p95_ms：860.6
+  - error_rate：0%
+
+- saturation_512_256，并发 64：
+  - requests_per_s：6.1092
+  - output_tokens_per_s：1564.0
+  - total_tokens_per_s：4691.9
+  - latency_p95_ms：10765.8
+  - ttft_p95_ms：991.2
+  - error_rate：0%
+
+- saturation_512_256，并发 80：
+  - requests_per_s：6.1523
+  - output_tokens_per_s：1575.0
+  - total_tokens_per_s：4725.0
+  - latency_p95_ms：11495.7
+  - ttft_p95_ms：1471.3
+  - error_rate：0%
+
+- long_context_8192_256，并发 4：
+  - output_tokens_per_s：84.9
+  - total_tokens_per_s：2801.7
+  - latency_p95_ms：12925.1
+  - ttft_p95_ms：5472.7
+  - error_rate：0%
+
+GPU 资源：
+
+- GPU0：
+  - 平均利用率：64.69%
+  - 峰值显存：22150 MiB
+  - 平均功耗：251.18 W
+  - 峰值温度：89C
+
+- GPU1：
+  - 平均利用率：65.04%
+  - 峰值显存：21938 MiB
+  - 平均功耗：242.77 W
+  - 峰值温度：65C
+
+结论：
+
+SGLang 稳定性很好，完整通过了长上下文和高并发测试。它的吞吐低于 vLLM 和 LMDeploy，但仍明显强于 Transformers / ModelScope。适合作为第三生产候选，或者用于需要 SGLang 编排能力、结构化输出控制、agent/workflow 能力的场景。
+
+
+4. ModelScope ms-swift
+~~~~~~~~~~~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix
+
+状态：
+- 使用 ms-swift + transformers 后端。
+- 总请求数：4776
+- 成功数：4412
+- 失败数：364
+- 总错误率：约 7.62%
+- 错误主要出现在 chat_512_256 并发 32。
+
+关键性能：
+
+- latency_256_128，并发 1：
+  - output_tokens_per_s：28.3
+  - latency_p95_ms：4679.4
+  - ttft_p95_ms：17.7
+
+- chat_512_256，并发 4：
+  - output_tokens_per_s：28.2
+  - latency_p95_ms：36893.7
+  - ttft_p95_ms：27738.4
+  - error_rate：0%
+
+- chat_512_256，并发 16：
+  - output_tokens_per_s：28.0
+  - latency_p95_ms：147924.9
+  - ttft_p95_ms：138734.4
+  - error_rate：0%
+
+- chat_512_256，并发 32：
+  - output_tokens_per_s：2.4
+  - latency_p95_ms：175460.8
+  - ttft_p95_ms：166289.5
+  - error_rate：约 94.79%
+
+- long_context_8192_256，并发 4：
+  - output_tokens_per_s：24.2
+  - total_tokens_per_s：791.8
+  - latency_p95_ms：41806.0
+  - ttft_p95_ms：31932.4
+
+GPU 资源：
+
+- GPU0：
+  - 平均利用率：21.98%
+  - 峰值显存：23871 MiB
+  - 平均功耗：128.34 W
+  - 峰值温度：89C
+
+- GPU1：
+  - 平均利用率：25.98%
+  - 峰值显存：21938 MiB
+  - 平均功耗：149.77 W
+  - 峰值温度：68C
+
+结论：
+
+ModelScope 能跑，但作为 transformers 后端基线，高并发吞吐非常低，延迟非常高，并发 32 出现大量失败。它更适合作为 ModelScope 生态兼容性验证，不适合作为企业高并发生产推理方案。
+
+
+5. Transformers BF16
+~~~~~~~~~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix
+
+状态：
+- 未完整跑完。
+- 服务从 2026-07-02 10:56 左右启动，到 2026-07-03 09:25 左右已经运行约 22 小时以上。
+- benchmark 从 2026-07-02 11:12 左右启动，到 2026-07-03 09:25 左右已经运行约 22 小时以上。
+- 因吞吐过低、高并发阶段耗时过长，继续跑完没有选型价值。
+- 已完成请求明细：4512 条。
+- 已完成批次：30 个。
+- 已生成 partial_summary.csv、partial_summary_by_concurrency.csv、partial_summary.md。
+
+阶段性结果：
+
+- latency_256_128，并发 1：
+  - output_tokens_per_s：27.87
+  - latency_p95_ms：4681.1
+  - ttft_p95_ms：67.8
+
+- chat_512_256，并发 4：
+  - output_tokens_per_s：15.06
+  - requests_per_s：0.0588
+  - latency_p95_ms：68613.1
+  - ttft_p95_ms：297.0
+
+- chat_512_256，并发 32：
+  - output_tokens_per_s：12.82
+  - requests_per_s：0.0500
+  - latency_p95_ms：641324.9
+  - ttft_p95_ms：3410.8
+
+- saturation_512_256，并发 1：
+  - output_tokens_per_s：27.95
+  - latency_p95_ms：9303.6
+  - ttft_p95_ms：104.9
+
+- saturation_512_256，并发 16：
+  - output_tokens_per_s：12.65
+  - latency_p95_ms：325305.4
+  - ttft_p95_ms：1670.0
+
+GPU 资源：
+
+- GPU0：
+  - 平均利用率：18.04%
+  - 峰值显存：18169 MiB
+  - 平均功耗：133.18 W
+  - 峰值温度：78C
+
+- GPU1：
+  - 平均利用率：22.82%
+  - 峰值显存：20515 MiB
+  - 平均功耗：160.32 W
+  - 峰值温度：65C
+
+结论：
+
+Transformers BF16 可以作为原生 PyTorch/HF 基线，但不适合作为企业高并发服务。它没有 vLLM、LMDeploy、SGLang 的 continuous batching、paged KV cache 和服务调度能力。22 小时仍未跑完完整压测，已经足以说明它不适合作为本项目生产候选。
+
+
+6. DeepSpeed
+~~~~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/deepspeed_tp2_nohup_8192fix
+
+失败案例：
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/failure/deepspeed_tp2_14b_bf16_oom_failure.md
+
+状态：
+- 未进入正式压测。
+- 启动阶段失败。
+- 失败类型：CUDA OOM。
+
+关键原因：
+
+当前 DeepSpeed 服务封装的流程是：
+
+1. transformers_openai_server.py 使用 AutoModelForCausalLM.from_pretrained 加载模型。
+2. 加载时使用 device_map=auto。
+3. device_map=auto 通过 Accelerate hooks 把 14B BF16 模型自动切分到双卡。
+4. deepspeed_openai_server.py 再调用 deepspeed.init_inference。
+5. DeepSpeed InferenceEngine 初始化时尝试 self.module.to(device)。
+6. 这会移动一个已经由 Accelerate hooks 分片管理的模型。
+7. GPU0 显存被打满，最终触发 OOM。
+
+关键日志：
+
+You shouldn't move a model that is dispatched using accelerate hooks.
+torch.OutOfMemoryError: CUDA out of memory.
+
+结论：
+
+DeepSpeed 当前最小 wrapper 不适合部署 DeepSeek-R1-Distill-Qwen-14B BF16。该失败不代表双 5090 不能部署 14B，而是 DeepSpeed wrapper 的工程封装不适合当前场景。生产部署不建议继续投入 DeepSpeed。
+
+
+7. Ollama
+~~~~~~~~~
+
+结果目录：
+/home/oem/llmDeploy/llm-benchmark-kit/results/ollama_deepseek_r1_distill_qwen_14b_conservative
+
+状态：
+- Ollama 没有作为企业高并发生产候选正式测试。
+- 项目里存在一次 conservative 结果：
+  - 总请求数：280
+  - 成功数：0
+  - 失败数：280
+  - 错误率：100%
+
+说明：
+
+Ollama 的定位和本项目目标不完全一致。它适合本地开发、桌面模型调用、轻量测试、简单运维体验，不适合作为双 5090 上的企业高并发推理服务主框架。
+
+结论：
+
+本轮最终企业部署选型不纳入 Ollama。后续如果只是做本地易用性体验，可以单独测 Ollama；但不建议把它放进高并发生产候选。
+
+
+五、横向对比
+------------
+
+高并发吞吐对比，使用 512 输入、256 输出的 saturation 或 chat 场景：
+
+1. vLLM TP=2
+   - saturation_512_256 并发 64：2554.6 output tok/s
+   - error_rate：0%
+   - p95 TTFT：904.1 ms
+   - p95 latency：6816.8 ms
+
+2. LMDeploy TP=2
+   - saturation_512_256 并发 64：2296.4 output tok/s
+   - error_rate：0%
+   - p95 TTFT：960.8 ms
+   - p95 latency：8081.9 ms
+
+3. SGLang TP=2
+   - saturation_512_256 并发 80：1575.0 output tok/s
+   - error_rate：0%
+   - p95 TTFT：1471.3 ms
+   - p95 latency：11495.7 ms
+
+4. ModelScope ms-swift
+   - chat_512_256 并发 16：约 28.0 output tok/s
+   - chat_512_256 并发 32：错误率约 94.79%
+   - 不适合高并发。
+
+5. Transformers BF16
+   - saturation_512_256 并发 1：约 27.95 output tok/s
+   - saturation_512_256 并发 16：约 12.65 output tok/s
+   - 22 小时未跑完完整压测，不适合高并发。
+
+6. DeepSpeed
+   - 启动失败，未进入压测。
+
+7. Ollama
+   - 非企业高并发候选，不纳入正式排名。
+
+
+六、长上下文对比
+----------------
+
+8192 输入、256 输出场景：
+
+1. vLLM TP=2，并发 4：
+   - output_tokens_per_s：104.8
+   - total_tokens_per_s：3459.9
+   - p95 latency：10628.4 ms
+   - p95 TTFT：3498.2 ms
+   - error_rate：0%
+
+2. LMDeploy TP=2，并发 4：
+   - output_tokens_per_s：116.4
+   - total_tokens_per_s：3842.6
+   - p95 latency：9391.2 ms
+   - p95 TTFT：2714.8 ms
+   - error_rate：0%
+
+3. SGLang TP=2，并发 4：
+   - output_tokens_per_s：84.9
+   - total_tokens_per_s：2801.7
+   - p95 latency：12925.1 ms
+   - p95 TTFT：5472.7 ms
+   - error_rate：0%
+
+4. ModelScope，并发 4：
+   - output_tokens_per_s：24.2
+   - p95 latency：41806.0 ms
+   - p95 TTFT：31932.4 ms
+
+结论：
+
+长上下文场景下，LMDeploy 和 vLLM 表现最好，SGLang 稳定但略慢，ModelScope 明显不适合作为高并发长上下文服务。
+
+
+七、稳定性对比
+--------------
+
+完整成功：
+
+- vLLM：8616/8616 成功，0 错误。
+- LMDeploy：8616/8616 成功，0 错误。
+- SGLang：13152/13152 成功，0 错误。
+
+部分成功或不适合：
+
+- ModelScope：4776 请求，4412 成功，364 失败，整体错误率约 7.62%，高并发 32 错误率很高。
+- Transformers：4512 条阶段性请求成功，但完整压测未跑完，耗时过长。
+- DeepSpeed：启动失败，未进入压测。
+- Ollama：不纳入高并发候选；conservative 测试请求全失败。
+
+
+八、生产部署建议
+----------------
+
+建议部署路线：
+
+1. 先用 vLLM TP=2 上生产灰度。
+   - 当前吞吐最高。
+   - OpenAI-compatible API 成熟。
+   - 8192 长上下文已验证。
+
+2. 保留 LMDeploy TP=2 作为备选。
+   - 稳定性好。
+   - 吞吐接近 vLLM。
+   - 对 LMDeploy/TurboMind 生态和量化部署有价值。
+
+3. 保留 SGLang TP=2 作为第三候选。
+   - 稳定性好。
+   - 如果后续需要 SGLang 的结构化、agent、workflow 编排能力，可以继续评估。
+
+4. 不建议生产使用 Transformers / ModelScope transformers 后端做高并发。
+   - 可以保留为原生框架基线或生态兼容性验证。
+
+5. 不建议继续投入 DeepSpeed 当前 wrapper。
+   - 若必须使用 DeepSpeed，需要重写多进程推理服务，不建议作为本轮选型必要工作。
+
+6. 不建议将 Ollama 纳入企业高并发推理部署。
+   - Ollama 更适合本地体验和轻量服务。
+
+
+九、最终排序
+------------
+
+企业高并发生产推荐：
+
+1. vLLM
+2. LMDeploy
+3. SGLang
+
+基线或兼容性参考：
+
+4. ModelScope
+5. Transformers
+
+不建议继续作为本轮生产候选：
+
+6. DeepSpeed
+7. Ollama
+
+
+十、备注
+--------
+
+本汇总使用的主要结果文件：
+
+- /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/aggregate_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/vllm_tp2_nohup_8192fix/gpu_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix/aggregate_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix/gpu_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix/aggregate_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/sglang_tp2_detailed_8192fix/gpu_summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/modelscope_swift_nohup_8192fix/summary.csv
+- /home/oem/llmDeploy/llm-benchmark-kit/results/transformers_bf16_nohup_8192fix/partial_summary.md
+- /home/oem/llmDeploy/llm-benchmark-kit/scripts/failure/deepspeed_tp2_14b_bf16_oom_failure.md
+
+最终结论一句话：
+
+双 RTX 5090 24G 上部署 DeepSeek-R1-Distill-Qwen-14B 企业推理服务，优先选择 vLLM；LMDeploy 是非常接近的备选；SGLang 稳定但吞吐较低；Transformers、ModelScope、DeepSpeed、Ollama 不适合作为本轮企业高并发生产主框架。

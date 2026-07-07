@@ -1,0 +1,120 @@
+# DeepSpeed TP=2 14B 压测启动说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用项目内置的 DeepSpeed OpenAI-compatible
+#   服务封装部署 DeepSeek-R1-Distill-Qwen-14B，并跑和 vLLM / SGLang /
+#   LMDeploy 相同的压测场景。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本轮结果保存路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit/results/deepspeed_tp2_nohup_8192fix
+#
+# 框架配置名：
+#   deepspeed_tp2
+#
+# 服务端口：
+#   8110
+#
+# 重要说明：
+#   DeepSpeed 在本项目里是“DeepSpeed init_inference 基线”，不是单机 14B
+#   生产首选。它的 OpenAI API 服务是项目内置的最小 FastAPI 封装：
+#     server_examples/deepspeed_openai_server.py
+#
+#   这个封装适合做基线测试，但工程成熟度不如 vLLM / SGLang / LMDeploy。
+#   当前启动脚本不使用 deepspeed --num_gpus 2 launcher，而是用单 HTTP 进程启动：
+#     CUDA_VISIBLE_DEVICES=0,1 python server_examples/deepspeed_openai_server.py --tp-size 1
+#
+#   原因是这个最小 FastAPI 封装不能直接让两个 DeepSpeed rank 同时开 HTTP 服务，
+#   否则 rank0 和 rank1 会抢同一个 8110 端口。这里先让 Transformers 的
+#   device_map=auto 把 14B BF16 权重放到双卡，再用 deepspeed.init_inference
+#   包一层作为 DeepSpeed 基线。
+#
+# 推荐执行顺序：
+#   1. 确认 vLLM / SGLang / LMDeploy / ModelScope 服务已经停止，释放两张 GPU 显存。
+#   2. 启动 DeepSpeed 服务。
+#   3. 等 DeepSpeed 日志显示服务启动完成后，启动 GPU 监控。
+#   4. 启动 benchmark.py 压测。
+#   5. 压测结束后运行 summarize.py 汇总。
+
+
+###############################################################################
+# 第 0 步：确认 GPU 显存已释放
+###############################################################################
+
+nvidia-smi
+
+# 如果看到旧服务仍占用 22000MiB 左右显存，请先停止旧服务。
+# 可以用下面命令查找相关进程：
+ps -ef | grep -E "vllm|sglang|lmdeploy|swift|deepspeed|api_server|Worker_TP|EngineCore" | grep -v grep
+
+
+###############################################################################
+# 第 1 步：启动 DeepSpeed TP=2 服务
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_deepspeed_tp2_8192fix.sh
+
+# 查看 DeepSpeed 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/deepspeed_tp2_nohup_8192fix/logs/deepspeed.log
+
+# 确认 8110 端口是否监听：
+ss -ltnp | grep ':8110'
+
+# 确认 OpenAI-compatible /v1/models 是否正常：
+curl -s http://127.0.0.1:8110/v1/models
+
+
+###############################################################################
+# 第 2 步：启动 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_deepspeed_tp2_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/deepspeed_tp2_nohup_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3 步：启动 DeepSpeed 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_deepspeed_tp2_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/deepspeed_tp2_nohup_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4 步：压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-deepspeed
+
+python scripts/summarize.py --results-dir results/deepspeed_tp2_nohup_8192fix
+
+
+###############################################################################
+# 常见问题
+###############################################################################
+
+# 1. 如果启动时报端口 8110 被占用：
+#    用下面命令查看占用进程：
+#      ss -ltnp | grep ':8110'
+#
+# 2. 如果启动时报显存不足：
+#    先确认其它框架服务是否还占着显存：
+#      nvidia-smi
+#    DeepSpeed 这套封装没有 vLLM/LMDeploy 那样成熟的 KV cache 显存比例参数，
+#    如果 14B BF16 仍然 OOM，建议把 DeepSpeed 只作为短上下文基线，或者改测量化模型。
+#
+# 3. 如果你坚持使用 deepspeed --num_gpus 2：
+#    需要重写 server_examples/deepspeed_openai_server.py，把 HTTP 服务限制在 rank0，
+#    同时让 rank0 把每个请求广播给 rank1，并让所有 rank 一起执行 generate。
+#    这个改造比当前基线复杂，不建议作为第一轮框架对比的必要步骤。

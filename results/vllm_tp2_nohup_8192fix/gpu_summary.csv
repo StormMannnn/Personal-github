@@ -1,0 +1,3 @@
+label,gpu_index,samples,gpu_util_avg_pct,gpu_util_peak_pct,memory_peak_mib,power_avg_w,temperature_peak_c
+vllm_tp2_8192fix,0,14122,64.4871,100.0000,23061.0000,259.0750,90.0000
+vllm_tp2_8192fix,1,14122,64.4500,100.0000,22876.0000,242.0651,65.0000

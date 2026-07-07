@@ -1,0 +1,118 @@
+# LMDeploy TP=2 14B 压测启动说明
+#
+# 适用场景：
+#   在双 RTX 5090 24G 服务器上，用 LMDeploy TurboMind 部署
+#   DeepSeek-R1-Distill-Qwen-14B，并跑和 vLLM / SGLang 相同的压测场景。
+#
+# 项目路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit
+#
+# 模型路径：
+#   /home/oem/llmDeploy/models/huggingface/DeepSeek-R1-Distill-Qwen-14B
+#
+# 本轮结果保存路径：
+#   /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix
+#
+# 框架配置名：
+#   lmdeploy_tp2
+#
+# 服务端口：
+#   8107
+#
+# 为什么 session-len 使用 8704：
+#   压测中包含 8192 输入 + 256 输出的长上下文场景。
+#   如果 session-len 只开 8192，总长度会超过服务端限制。
+#   8192 + 256 = 8448，所以 LMDeploy 这里使用 --session-len 8704。
+#
+# 为什么 max-prefill-token-num 使用 8192：
+#   LMDeploy 在 session-len=9216 时会尝试 warm-up 9344 tokens，
+#   双 5090 24G 上可能失败。这里把 prefill 上限控制在 8192，
+#   用来覆盖本项目的 8192 输入场景，同时避免过大的 warm-up。
+#
+# 为什么设置 NCCL_WIN_ENABLE=0：
+#   日志里提示 NCCL 2.27 的 window registration 可能导致内存泄漏。
+#   设置 NCCL_WIN_ENABLE=0 可以关闭该特性，消除这个警告。
+#
+# 推荐执行顺序：
+#   1. 确认 vLLM / SGLang 服务已经停止，释放两张 GPU 显存。
+#   2. 启动 LMDeploy 服务。
+#   3. 等 LMDeploy 日志显示服务启动完成后，启动 GPU 监控。
+#   4. 启动 benchmark.py 压测。
+#   5. 压测结束后运行 summarize.py 汇总。
+
+
+###############################################################################
+# 第 0 步：确认 GPU 显存已释放
+###############################################################################
+
+nvidia-smi
+
+# 如果看到旧服务仍占用 22000MiB 左右显存，请先停止旧服务。
+# 可以用下面命令查找相关进程：
+ps -ef | grep -E "vllm|sglang|lmdeploy|api_server|Worker_TP|EngineCore" | grep -v grep
+
+
+###############################################################################
+# 第 1 步：启动 LMDeploy TP=2 服务
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_lmdeploy_tp2_8192fix.sh
+
+# 查看 LMDeploy 启动日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix/logs/lmdeploy.log
+
+# 确认 8107 端口是否监听：
+ss -ltnp | grep ':8107'
+
+
+###############################################################################
+# 第 2 步：启动 GPU 监控
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_lmdeploy_tp2_gpu_monitor.sh
+
+# GPU 监控不会持续往 gpu_monitor.log 打日志，主要数据在 gpu_metrics.csv：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix/gpu_metrics.csv
+
+
+###############################################################################
+# 第 3 步：启动 LMDeploy 压测
+###############################################################################
+
+/home/oem/llmDeploy/llm-benchmark-kit/scripts/command/start_lmdeploy_tp2_benchmark.sh
+
+# 查看压测日志：
+tail -f /home/oem/llmDeploy/llm-benchmark-kit/results/lmdeploy_tp2_nohup_8192fix/logs/benchmark.log
+
+
+###############################################################################
+# 第 4 步：压测结束后汇总结果
+###############################################################################
+
+cd /home/oem/llmDeploy/llm-benchmark-kit
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate llm-lmdeploy
+
+python scripts/summarize.py --results-dir results/lmdeploy_tp2_nohup_8192fix
+
+
+###############################################################################
+# 常见问题
+###############################################################################
+
+# 1. 如果启动时报端口 8107 被占用：
+#    用下面命令查看占用进程：
+#      ss -ltnp | grep ':8107'
+#
+# 2. 如果启动时报显存不足：
+#    先确认 vLLM / SGLang 是否还占着显存：
+#      nvidia-smi
+#    当前脚本已经使用较保守的：
+#      --cache-max-entry-count 0.80
+#    如果仍然 OOM，可以进一步改成：
+#      --cache-max-entry-count 0.70
+#
+# 3. 如果 8192 输入因为上下文限制失败：
+#    确认启动命令里有：
+#      --session-len 8704
+#      --max-prefill-token-num 8192
