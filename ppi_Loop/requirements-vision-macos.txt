@@ -1,0 +1,18 @@
+# PPI Loop complete macOS runtime dependencies (Python 3.11).
+langgraph==1.2.9
+langgraph-checkpoint-sqlite==3.1.0
+aiosqlite==0.22.1
+openai==2.46.0
+httpx==0.28.1
+pydantic==2.13.4
+pandas==3.0.3
+numpy==2.3.5
+openpyxl==3.1.5
+Pillow==12.3.0
+requests==2.34.2
+urllib3==2.7.0
+rapidfuzz==3.14.5
+pypinyin==0.55.0
+paddlepaddle==3.3.1
+paddleocr[doc-parser]==3.7.0
+opencv-contrib-python==4.10.0.84
